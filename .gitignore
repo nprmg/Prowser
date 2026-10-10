@@ -1,0 +1,10 @@
+# Файлы мест, собранные через `rojo build`
+/*.rbxl
+/*.rbxlx
+/*.rbxm
+/*.rbxmx
+*.rbxl.lock
+*.rbxlx.lock
+
+# Генерируется `rojo sourcemap` для luau-lsp
+sourcemap.json
