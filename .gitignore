@@ -1,0 +1,13 @@
+# Файлы мест, собранные через `rojo build`
+/*.rbxl
+/*.rbxlx
+/*.rbxm
+/*.rbxmx
+*.rbxl.lock
+*.rbxlx.lock
+
+# rojo.exe, скачанный в папку проекта вместо установки через Rokit
+/rojo.exe
+
+# Генерируется `rojo sourcemap` для luau-lsp
+sourcemap.json

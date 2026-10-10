@@ -1,0 +1,3 @@
+# Версии инструментов проекта. Установка: `rokit install`
+[tools]
+rojo = "rojo-rbx/rojo@7.7.1"
