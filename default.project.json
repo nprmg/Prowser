@@ -3,18 +3,18 @@
   "tree": {
     "$className": "DataModel",
     "ReplicatedStorage": {
-      "Shared": {
+      "RojoShared": {
         "$path": "src/shared"
       }
     },
     "ServerScriptService": {
-      "Server": {
+      "RojoServer": {
         "$path": "src/server"
       }
     },
     "StarterPlayer": {
       "StarterPlayerScripts": {
-        "Client": {
+        "RojoClient": {
           "$path": "src/client"
         }
       }

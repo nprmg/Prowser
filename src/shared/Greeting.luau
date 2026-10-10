@@ -1,4 +1,4 @@
--- Общий модуль: доступен и серверу, и клиенту (ReplicatedStorage.Shared.Greeting)
+-- Общий модуль: доступен и серверу, и клиенту (ReplicatedStorage.RojoShared.Greeting)
 local Greeting = {}
 
 function Greeting.make(side: string): string

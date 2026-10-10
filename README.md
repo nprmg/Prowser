@@ -6,9 +6,9 @@
 
 | Папка | Куда попадает в Studio | Для чего |
 |---|---|---|
-| `src/server` | `ServerScriptService.Server` | серверные скрипты |
-| `src/client` | `StarterPlayer.StarterPlayerScripts.Client` | клиентские скрипты |
-| `src/shared` | `ReplicatedStorage.Shared` | общие модули |
+| `src/server` | `ServerScriptService.RojoServer` | серверные скрипты |
+| `src/client` | `StarterPlayer.StarterPlayerScripts.RojoClient` | клиентские скрипты |
+| `src/shared` | `ReplicatedStorage.RojoShared` | общие модули |
 
 Имена файлов задают тип скрипта:
 
@@ -16,7 +16,9 @@
 - `*.client.luau` — `LocalScript`
 - `*.luau` — `ModuleScript`
 
-Rojo управляет только папками `Server`, `Client` и `Shared`. Всё, что уже есть в игре вне этих папок, он не трогает.
+Rojo управляет только папками `RojoServer`, `RojoClient` и `RojoShared`. Всё, что уже есть в игре вне этих папок, он не трогает.
+
+> **Не переименовывайте эти папки в имена, которые уже заняты в игре.** Например, `ServerScriptService.Server` — это главный серверный скрипт игры. Если в проекте окажется объект с таким же именем, Rojo будет считать его своим и может заменить.
 
 ## Первая настройка
 
