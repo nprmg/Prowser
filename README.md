@@ -36,8 +36,9 @@ Gemini или DeepSeek.
    При установке отметьте галочку **«Add python.exe to PATH»**.
 2. Получите API-ключ (хватит одного, но лучше оба — второй станет запасным):
    - **Gemini** — бесплатно: <https://aistudio.google.com/apikey> (из России нужен VPN);
-   - **DeepSeek** — платно, но очень дёшево, работает из России без VPN: <https://platform.deepseek.com/api_keys>
-     (баланс пополняется на <https://platform.deepseek.com/top_up>).
+   - **DeepSeek** — платно, но очень дёшево (доли цента за команду): <https://platform.deepseek.com/api_keys>.
+     Баланс пополняется на <https://platform.deepseek.com/top_up> (PayPal, банковская карта, Alipay, WeChat Pay;
+     российские карты, по отзывам, обычно не проходят).
 3. Скачайте проект (кнопка **Code → Download ZIP** на GitHub) и распакуйте.
 4. Запустите **`install.bat`** — он создаст виртуальное окружение и поставит зависимости.
 5. Запустите **`start.bat`**. При первом запуске ассистент попросит ключи и сохранит их в файл `.env`.
