@@ -67,6 +67,7 @@ class Assistant:
         """Обрабатывает одну просьбу пользователя (блокирует до конца ответа и озвучки)."""
         self._local.source = source
         self.ui.show_user(text, source)
+        getattr(self.ui, "begin_request", lambda: None)()
         self.ui.set_status("thinking")
         reply = self.brain.ask(text)
         self.ui.show_reply(reply)
@@ -167,7 +168,7 @@ class Assistant:
                 continue
             if self._direct_next.is_set():
                 self._direct_next.clear()
-                self.handle(text, "voice")
+                self._handle_safely(text)
                 continue
             found, command = split_wake_word(text, self.settings.wake_words)
             if not found:
@@ -185,4 +186,13 @@ class Assistant:
                 if not command:
                     self.ui.set_status("idle")
                     continue
-            self.handle(command, "voice")
+            self._handle_safely(command)
+
+    def _handle_safely(self, text: str) -> None:
+        """Ошибка в одной команде не должна останавливать фоновое прослушивание."""
+        try:
+            self.handle(text, "voice")
+        except Exception as exc:
+            log.exception("Ошибка обработки голосовой команды")
+            self.ui.show_info(f"Ошибка: {exc}", error=True)
+            self.ui.set_status("idle")

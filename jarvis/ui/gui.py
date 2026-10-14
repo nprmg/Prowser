@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from ..assistant import Assistant, greeting
 from ..brain import MODES
-from ..config import Settings, save_api_keys
+from ..config import Settings, clean_key, key_problem, save_api_keys
 from ..runtime import runtime
 from ..tools._platform import IS_WIN
 from . import format_tool_call
@@ -83,13 +83,21 @@ class KeysDialog(simpledialog.Dialog):
         box.pack()
 
     def validate(self) -> bool:
-        if not self.gemini_entry.get().strip() and not self.deepseek_entry.get().strip():
+        gemini, deepseek = clean_key(self.gemini_entry.get()), clean_key(self.deepseek_entry.get())
+        if not gemini and not deepseek:
             messagebox.showwarning("API-ключи", "Нужен хотя бы один ключ.", parent=self)
             return False
+        for name, key in (("Gemini", gemini), ("DeepSeek", deepseek)):
+            problem = key_problem(key)
+            if problem:
+                messagebox.showwarning(
+                    "API-ключи", f"Ключ {name} {problem}. Скопируйте его заново, переключив раскладку.", parent=self
+                )
+                return False
         return True
 
     def apply(self) -> None:
-        self.keys = (self.gemini_entry.get().strip(), self.deepseek_entry.get().strip())
+        self.keys = (clean_key(self.gemini_entry.get()), clean_key(self.deepseek_entry.get()))
 
 
 class JarvisApp:
@@ -285,11 +293,17 @@ class JarvisApp:
 
     def set_status(self, status: str) -> None:
         def apply():
-            if status == "thinking" and self._status != "thinking":
-                self._thinking_since = time.monotonic()
-                self._provider = ""
             self._status = status
             self._render_status()
+
+        self._ui(apply)
+
+    def begin_request(self) -> None:
+        """Новый запрос: обнуляем таймер «Думаю… N с» и имя ИИ."""
+
+        def apply():
+            self._thinking_since = time.monotonic()
+            self._provider = ""
 
         self._ui(apply)
 
@@ -436,13 +450,16 @@ class JarvisApp:
         if not self.settings.api_key and not self.settings.deepseek_api_key and not self._ask_api_keys():
             self.root.destroy()
             return
-        try:
-            self.assistant = Assistant(self.settings, self)
-        except Exception as exc:
-            log.exception("Не удалось запустить ассистента")
-            messagebox.showerror("J.A.R.V.I.S.", f"Не удалось запустить ассистента:\n{exc}", parent=self.root)
-            self.root.destroy()
-            return
+        while self.assistant is None:
+            try:
+                self.assistant = Assistant(self.settings, self)
+            except Exception as exc:
+                log.exception("Не удалось запустить ассистента")
+                messagebox.showerror("J.A.R.V.I.S.", f"Не удалось запустить ассистента:\n{exc}", parent=self.root)
+                # Чаще всего виноват ключ — даём исправить его, а не закрываемся.
+                if not self._ask_api_keys():
+                    self.root.destroy()
+                    return
         runtime.release_focus = self.release_focus
         if self.assistant.voice_error:
             self.show_info(self.assistant.voice_error, error=True)

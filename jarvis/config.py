@@ -1,6 +1,7 @@
 """Загрузка настроек из файла .env и переменных окружения."""
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +23,19 @@ def _get_bool(name: str, default: bool) -> bool:
     value = _get(name)
     if not value:
         return default
-    return value.lower() in ("1", "true", "yes", "on", "да")
+    return value.lower() in ("1", "true", "yes", "on", "да", "enabled")
+
+
+def clean_key(key: str) -> str:
+    """Убирает пробелы и невидимые символы, которые часто попадают в ключ при копировании."""
+    return re.sub(r"[\s\u200b-\u200d\u2060\ufeff]", "", key or "")
+
+
+def key_problem(key: str) -> str | None:
+    """Описание проблемы с ключом или None, если ключ выглядит нормально."""
+    if key and not (key.isascii() and key.isprintable()):
+        return "содержит недопустимые символы (например, русские буквы)"
+    return None
 
 
 def _get_float(name: str, default: float) -> float:
@@ -54,7 +67,7 @@ class Settings:
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-flash"
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_timeout: float = 60.0
+    deepseek_timeout: float = 30.0
     # Режим размышлений DeepSeek: disabled — быстрее (для голосового ассистента), enabled — умнее.
     deepseek_thinking: str = "disabled"
     # Простые команды («открой блокнот», «громкость 30») выполнять сразу, без ИИ.
@@ -78,15 +91,15 @@ def load_settings() -> Settings:
     wake_words = [w.strip().lower() for w in _get("WAKE_WORDS", DEFAULT_WAKE_WORDS).split(",") if w.strip()]
     return Settings(
         provider=(_get("LLM_PROVIDER") or Settings.provider).lower(),
-        api_key=_get("GEMINI_API_KEY") or _get("GOOGLE_API_KEY"),
+        api_key=clean_key(_get("GEMINI_API_KEY") or _get("GOOGLE_API_KEY")),
         model=_get("GEMINI_MODEL") or Settings.model,
         thinking_level=_get("GEMINI_THINKING_LEVEL", Settings.thinking_level).lower(),
         gemini_timeout=_get_float("GEMINI_TIMEOUT", Settings.gemini_timeout),
-        deepseek_api_key=_get("DEEPSEEK_API_KEY"),
+        deepseek_api_key=clean_key(_get("DEEPSEEK_API_KEY")),
         deepseek_model=_get("DEEPSEEK_MODEL") or Settings.deepseek_model,
         deepseek_base_url=(_get("DEEPSEEK_BASE_URL") or Settings.deepseek_base_url).rstrip("/"),
         deepseek_timeout=_get_float("DEEPSEEK_TIMEOUT", Settings.deepseek_timeout),
-        deepseek_thinking=_get("DEEPSEEK_THINKING", Settings.deepseek_thinking).lower(),
+        deepseek_thinking="enabled" if _get_bool("DEEPSEEK_THINKING", False) else "disabled",
         fast_commands=_get_bool("FAST_COMMANDS", Settings.fast_commands),
         assistant_name=_get("ASSISTANT_NAME") or Settings.assistant_name,
         user_title=_get("USER_TITLE") or Settings.user_title,
@@ -117,8 +130,10 @@ def save_env_value(name: str, value: str) -> None:
 def save_api_keys(settings: Settings, gemini: str | None = None, deepseek: str | None = None) -> None:
     """Сохраняет ключи в .env и в настройки. None — не менять, пустая строка — удалить ключ."""
     if gemini is not None:
+        gemini = clean_key(gemini)
         save_env_value("GEMINI_API_KEY", gemini)
         settings.api_key = gemini
     if deepseek is not None:
+        deepseek = clean_key(deepseek)
         save_env_value("DEEPSEEK_API_KEY", deepseek)
         settings.deepseek_api_key = deepseek

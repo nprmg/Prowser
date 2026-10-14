@@ -8,7 +8,8 @@ from google import genai
 from google.genai import errors, types
 
 from .. import tools
-from ..config import Settings
+from ..config import Settings, key_problem
+from . import base
 from .base import (
     COOLDOWN_LONG,
     COOLDOWN_QUOTA,
@@ -35,6 +36,9 @@ class GeminiProvider:
     name = "Gemini"
 
     def __init__(self, settings: Settings):
+        problem = key_problem(settings.api_key)
+        if problem:
+            raise ValueError(f"Ключ Gemini {problem} — исправьте его кнопкой «Ключи API»")
         self.model = settings.model
         self.timeout = settings.gemini_timeout
         self.client = genai.Client(
@@ -70,12 +74,17 @@ class GeminiProvider:
         ]
         contents.append(types.Content(role="user", parts=[types.Part(text=text)]))
         texts: list[str] = []
-        # Общий срок на весь ответ (все шаги с инструментами), чтобы не ждать минутами.
-        deadline = time.monotonic() + max(45.0, self.timeout * 2)
+        # Общий лимит ожидания модели за один ответ (все шаги), чтобы не ждать минутами.
+        # Время работы инструментов (диалоги подтверждения, команды) сюда не входит.
+        budget, waited = max(base.MIN_TURN_BUDGET, self.timeout * 2), 0.0
         for _ in range(MAX_TOOL_ROUNDS):
-            if time.monotonic() > deadline:
+            if budget - waited < 1:
                 raise ProviderError(self.name, "отвечает слишком медленно", retryable=True)
-            response = self._generate(contents, system_prompt)
+            started = time.monotonic()
+            try:
+                response = self._generate(contents, system_prompt, min(self.timeout, budget - waited))
+            finally:
+                waited += time.monotonic() - started
             calls = response.function_calls or []
             if not calls:
                 return final_reply(texts, _response_text(response), runner)
@@ -99,12 +108,14 @@ class GeminiProvider:
             )
         return TOO_MANY_STEPS
 
-    def _generate(self, contents: list[types.Content], system_prompt: str) -> types.GenerateContentResponse:
+    def _generate(
+        self, contents: list[types.Content], system_prompt: str, timeout: float
+    ) -> types.GenerateContentResponse:
         while True:
+            config = self._config(system_prompt)
+            config.http_options = types.HttpOptions(timeout=int(timeout * 1000), headers={"X-Server-Timeout": "60"})
             try:
-                return self.client.models.generate_content(
-                    model=self.model, contents=contents, config=self._config(system_prompt)
-                )
+                return self.client.models.generate_content(model=self.model, contents=contents, config=config)
             except errors.APIError as exc:
                 # Модель не поддерживает этот уровень размышлений — пробуем следующий (или без него).
                 if self._thinking_levels and exc.code == 400 and "think" in str(exc).lower():
@@ -113,7 +124,7 @@ class GeminiProvider:
                     continue
                 raise self._describe(exc) from exc
             except httpx.TimeoutException as exc:
-                raise ProviderError(self.name, f"не ответил за {self.timeout:.0f} с", retryable=True) from exc
+                raise ProviderError(self.name, f"не ответил за {timeout:.0f} с", retryable=True) from exc
             except httpx.TransportError as exc:
                 raise ProviderError(
                     self.name, "нет связи с сервером (проверьте интернет, VPN или HTTPS_PROXY)", retryable=True

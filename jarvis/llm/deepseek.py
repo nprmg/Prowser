@@ -8,7 +8,8 @@ from typing import Any
 import httpx
 
 from .. import tools
-from ..config import Settings
+from ..config import Settings, key_problem
+from . import base
 from .base import COOLDOWN_LONG, MAX_TOOL_ROUNDS, TOO_MANY_STEPS, ProviderError, ToolRunner, Turn, final_reply
 
 log = logging.getLogger("jarvis.llm")
@@ -19,16 +20,17 @@ class DeepSeekProvider:
     name = "DeepSeek"
 
     def __init__(self, settings: Settings):
+        problem = key_problem(settings.deepseek_api_key)
+        if problem:
+            raise ValueError(f"Ключ DeepSeek {problem} — исправьте его кнопкой «Ключи API»")
         self.model = settings.deepseek_model
         self.timeout = settings.deepseek_timeout
         # Размышления у DeepSeek включены по умолчанию и сильно замедляют ответ,
         # поэтому режим всегда передаём явно (по умолчанию — disabled).
-        self.thinking = settings.deepseek_thinking if settings.deepseek_thinking in ("enabled", "disabled") else ""
+        self.thinking = "enabled" if settings.deepseek_thinking == "enabled" else "disabled"
         self.client = httpx.Client(
             base_url=settings.deepseek_base_url,
             headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
-            # Таймаут на соединение и на паузу между порциями данных; общий лимит — в _complete.
-            timeout=httpx.Timeout(min(self.timeout, 10.0), connect=10.0),
         )
 
     @staticmethod
@@ -46,17 +48,39 @@ class DeepSeekProvider:
         ]
 
     def run_turn(self, system_prompt: str, history: list[Turn], text: str, runner: ToolRunner) -> str:
+        # В режиме размышлений с инструментами DeepSeek требует reasoning_content всех прошлых ответов.
+        # Если в истории есть ответы без него (быстрые команды, Gemini), этот ответ готовим без размышлений.
+        thinking = self.thinking
+        if thinking == "enabled" and any(turn.role == "assistant" and not turn.reasoning for turn in history):
+            thinking = "disabled"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         for turn in history:
             message: dict[str, Any] = {"role": turn.role, "content": turn.text}
-            if turn.reasoning and self.thinking == "enabled":
-                # В режиме размышлений с инструментами DeepSeek требует reasoning_content прошлых ответов.
+            if turn.reasoning and thinking == "enabled":
                 message["reasoning_content"] = turn.reasoning
             messages.append(message)
         messages.append({"role": "user", "content": text})
         texts: list[str] = []
+        # Общий лимит ожидания модели за один ответ (все шаги), без времени работы инструментов.
+        budget, waited = max(base.MIN_TURN_BUDGET, self.timeout * 2), 0.0
         for _ in range(MAX_TOOL_ROUNDS):
-            message = self._complete(messages)
+            if budget - waited < 1:
+                raise ProviderError(self.name, "отвечает слишком медленно", retryable=True)
+            started = time.monotonic()
+            try:
+                message = self._request(messages, thinking, min(self.timeout, budget - waited))
+            except ProviderError as exc:
+                # API не принял историю в режиме размышлений — этот ответ готовим без них.
+                if thinking == "enabled" and exc.status == 400 and "reasoning" in exc.detail.lower():
+                    log.warning("DeepSeek: отвечаю без размышлений из-за ошибки: %s", exc.detail)
+                    thinking = "disabled"
+                    for item in messages:
+                        item.pop("reasoning_content", None)
+                    message = self._request(messages, thinking, min(self.timeout, max(1.0, budget - waited)))
+                else:
+                    raise
+            finally:
+                waited += time.monotonic() - started
             calls = message.get("tool_calls") or []
             content = (message.get("content") or "").strip()
             if not calls:
@@ -83,35 +107,23 @@ class DeepSeekProvider:
                 })
         return TOO_MANY_STEPS
 
-    def _complete(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        while True:
-            try:
-                return self._request(messages)
-            except ProviderError as exc:
-                # Если в режиме размышлений API не принял историю (нет reasoning_content у старых
-                # ответов, например написанных Gemini), продолжаем без размышлений.
-                if self.thinking == "enabled" and exc.status == 400 and "reasoning" in exc.detail.lower():
-                    log.warning("DeepSeek: отключаю режим размышлений из-за ошибки: %s", exc.detail)
-                    self.thinking = "disabled"
-                    continue
-                raise
-
-    def _request(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _request(self, messages: list[dict[str, Any]], thinking: str, timeout: float) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "tools": self._tools(),
             "tool_choice": "auto",
-            "max_tokens": 2048,
+            "max_tokens": 8192 if thinking == "enabled" else 2048,
             "stream": False,
+            "thinking": {"type": thinking},
         }
-        if self.thinking:
-            body["thinking"] = {"type": self.thinking}
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + timeout
         try:
-            # Под нагрузкой DeepSeek держит соединение пустыми строками, поэтому читаем тело
-            # по частям и сами следим за общим временем ожидания.
-            with self.client.stream("POST", "/chat/completions", json=body) as response:
+            # Под нагрузкой DeepSeek держит соединение пустыми строками (обычный таймаут чтения
+            # тогда не срабатывает), поэтому читаем тело по частям и сами следим за общим временем.
+            with self.client.stream(
+                "POST", "/chat/completions", json=body, timeout=httpx.Timeout(timeout, connect=min(10.0, timeout))
+            ) as response:
                 chunks = []
                 for chunk in response.iter_bytes():
                     chunks.append(chunk)
@@ -120,7 +132,7 @@ class DeepSeekProvider:
                 raw = b"".join(chunks)
                 status = response.status_code
         except httpx.TimeoutException as exc:
-            raise ProviderError(self.name, f"не ответил за {self.timeout:.0f} с", retryable=True) from exc
+            raise ProviderError(self.name, f"не ответил за {timeout:.0f} с", retryable=True) from exc
         except httpx.TransportError as exc:
             raise ProviderError(self.name, "нет связи с сервером (проверьте интернет)", retryable=True) from exc
         try:
@@ -134,8 +146,13 @@ class DeepSeekProvider:
             message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(self.name, "вернул пустой ответ", retryable=True) from exc
-        if choice.get("finish_reason") == "insufficient_system_resource":
+        finish = choice.get("finish_reason")
+        if finish == "insufficient_system_resource":
             raise ProviderError(self.name, "перегружен (не хватило ресурсов сервера)", retryable=True)
+        if finish in ("length", "content_filter") and not (message.get("content") or "").strip() \
+                and not message.get("tool_calls"):
+            why = "ответ заблокирован фильтром" if finish == "content_filter" else "ответ не уместился в лимит"
+            raise ProviderError(self.name, f"не смог ответить ({why})", cooldown=0)
         return message
 
     def _describe(self, status: int, data: dict[str, Any], raw: bytes) -> ProviderError:
