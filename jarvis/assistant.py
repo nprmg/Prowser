@@ -41,7 +41,12 @@ class Assistant:
         self.settings = settings
         self.ui = ui
         self.speaker = Speaker(settings)
-        self.brain = Brain(settings, on_tool_call=ui.show_tool)
+        self.brain = Brain(
+            settings,
+            on_tool_call=ui.show_tool,
+            on_notice=lambda text: ui.show_info(text),
+            on_provider=getattr(ui, "show_provider", None),  # необязательно: показать, какой ИИ думает
+        )
         self.listener = None
         self.voice_error = ""
         try:

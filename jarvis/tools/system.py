@@ -360,7 +360,7 @@ def take_screenshot() -> dict:
     return {"saved_to": str(path)}
 
 
-@tool()
+@tool(enabled=lambda: runtime.client is not None)  # нужен Gemini: DeepSeek не умеет смотреть на картинки
 def look_at_screen(question: str = "Опиши, что сейчас на экране") -> str:
     """Посмотреть на экран пользователя: сделать снимок и проанализировать его.
     Используй, когда спрашивают, что на экране, просят прочитать текст, объяснить ошибку в открытом окне и т. п.

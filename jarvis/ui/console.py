@@ -38,7 +38,9 @@ def run_chat(settings: Settings) -> None:
     assistant = Assistant(settings, ConsoleUI(settings))
     hello = greeting(settings)
     print(f"\n{settings.assistant_name}: {hello}")
-    print("[i] Команды: /new — новый диалог, /mute — вкл/выкл озвучку, /exit — выход.\n")
+    print(f"[i] Мозг: {assistant.brain.describe()}.")
+    print("[i] Команды: /new — новый диалог, /mute — вкл/выкл озвучку, "
+          "/ai auto|gemini|deepseek — выбрать ИИ, /exit — выход.\n")
     threading.Thread(target=assistant.say, args=(hello,), daemon=True).start()
     while True:
         try:
@@ -53,6 +55,14 @@ def run_chat(settings: Settings) -> None:
         if command in ("/new", "/reset"):
             assistant.brain.reset()
             print("[i] Начат новый диалог.")
+            continue
+        if command.startswith("/ai"):
+            mode = command.removeprefix("/ai").strip()
+            try:
+                assistant.brain.set_mode(mode)
+                print(f"[i] Мозг: {assistant.brain.describe()}.")
+            except ValueError:
+                print(f"[!] Доступно: {', '.join(assistant.brain.available_modes())}")
             continue
         if command == "/mute":
             assistant.speaker.enabled = not assistant.speaker.enabled

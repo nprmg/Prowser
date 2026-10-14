@@ -6,11 +6,13 @@ import queue
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, simpledialog
 from typing import Any, Callable
 
 from ..assistant import Assistant, greeting
-from ..config import Settings, save_api_key
+from ..brain import MODES
+from ..config import Settings, save_api_keys
 from ..runtime import runtime
 from ..tools._platform import IS_WIN
 from . import format_tool_call
@@ -39,6 +41,57 @@ STATUSES = {
 }
 
 
+class KeysDialog(simpledialog.Dialog):
+    """Окно ввода API-ключей Gemini и DeepSeek (достаточно одного, второй станет запасным)."""
+
+    LINKS = {
+        "gemini": ("Gemini — бесплатно: aistudio.google.com/apikey", "https://aistudio.google.com/apikey"),
+        "deepseek": ("DeepSeek — платно, дёшево: platform.deepseek.com", "https://platform.deepseek.com/api_keys"),
+    }
+
+    def __init__(self, parent: tk.Misc, settings: Settings):
+        self.settings = settings
+        self.keys: tuple[str, str] | None = None
+        super().__init__(parent, "API-ключи")
+
+    def _row(self, master: tk.Frame, row: int, key: str, value: str) -> tk.Entry:
+        text, url = self.LINKS[key]
+        link = tk.Label(master, text=text, fg="#1f6feb", cursor="hand2", anchor="w")
+        link.grid(row=row, column=0, sticky="w", pady=(8, 2))
+        link.bind("<Button-1>", lambda _e: webbrowser.open(url))
+        entry = tk.Entry(master, width=56, show="*")
+        entry.insert(0, value)
+        entry.grid(row=row + 1, column=0, sticky="we")
+        return entry
+
+    def body(self, master: tk.Frame) -> tk.Entry:
+        tk.Label(
+            master, justify="left", anchor="w",
+            text="Укажите хотя бы один ключ. Если указаны оба, при сбое Gemini\n"
+                 "ассистент сам переключится на DeepSeek. Ключи сохраняются в файл .env.",
+        ).grid(row=0, column=0, sticky="w")
+        self.gemini_entry = self._row(master, 1, "gemini", self.settings.api_key)
+        self.deepseek_entry = self._row(master, 3, "deepseek", self.settings.deepseek_api_key)
+        return self.gemini_entry
+
+    def buttonbox(self) -> None:
+        box = tk.Frame(self)
+        tk.Button(box, text="Сохранить", width=12, command=self.ok, default="active").pack(side="left", padx=5, pady=8)
+        tk.Button(box, text="Отмена", width=12, command=self.cancel).pack(side="left", padx=5, pady=8)
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+        box.pack()
+
+    def validate(self) -> bool:
+        if not self.gemini_entry.get().strip() and not self.deepseek_entry.get().strip():
+            messagebox.showwarning("API-ключи", "Нужен хотя бы один ключ.", parent=self)
+            return False
+        return True
+
+    def apply(self) -> None:
+        self.keys = (self.gemini_entry.get().strip(), self.deepseek_entry.get().strip())
+
+
 class JarvisApp:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -47,6 +100,8 @@ class JarvisApp:
         self._tasks: queue.Queue = queue.Queue()
         self._wake_stop: threading.Event | None = None
         self._status = "idle"
+        self._provider = ""  # какой ИИ сейчас думает
+        self._thinking_since = 0.0
         self._blink = False
         self._hwnd = 0
 
@@ -92,7 +147,17 @@ class JarvisApp:
             side="left", padx=10
         )
         self.status_label = tk.Label(header, text="Запуск…", font=(FONT, 11), fg=C["muted"], bg=C["bg"])
-        self.status_label.pack(side="right")
+        self.status_label.pack(side="left", padx=(6, 0))
+        self._button(header, "Ключи API", self._edit_keys).pack(side="right")
+        self.ai_var = tk.StringVar(value=MODES["auto"])
+        self.ai_menu = tk.OptionMenu(header, self.ai_var, MODES["auto"])
+        self.ai_menu.configure(
+            font=(FONT, 10), bg=C["border"], fg=C["text"], activebackground="#2a3a57", activeforeground=C["text"],
+            relief="flat", bd=0, highlightthickness=0, cursor="hand2", padx=10, pady=6,
+        )
+        self.ai_menu["menu"].configure(font=(FONT, 10), bg=C["panel"], fg=C["text"], activebackground=C["border"])
+        self.ai_menu.pack(side="right", padx=(0, 8))
+        tk.Label(header, text="ИИ:", font=(FONT, 10), fg=C["muted"], bg=C["bg"]).pack(side="right", padx=(0, 6))
 
         # Нижние панели упаковываем раньше чата, чтобы при маленьком окне сжимался чат, а не поле ввода.
         options = tk.Frame(self.root, bg=C["bg"])
@@ -187,7 +252,11 @@ class JarvisApp:
         if status == "idle" and self.wake_var.get():
             status = "background"
         text, color = STATUSES[status]
-        self.status_label.configure(text=text.format(name=self.settings.assistant_name), fg=color)
+        text = text.format(name=self.settings.assistant_name)
+        if status == "thinking":  # «Думаю… Gemini · 7 с» — видно, кто и сколько отвечает
+            seconds = int(time.monotonic() - self._thinking_since)
+            text = " ".join(part for part in (text, self._provider, f"· {seconds} с" if seconds else "") if part)
+        self.status_label.configure(text=text, fg=color)
         self.indicator.itemconfigure(self._core, fill=color)
         self.indicator.itemconfigure(self._ring, outline=color)
 
@@ -196,6 +265,8 @@ class JarvisApp:
             self._blink = not self._blink
             color = STATUSES[self._status][1]
             self.indicator.itemconfigure(self._ring, outline=color if self._blink else C["border"])
+            if self._status == "thinking":
+                self._render_status()
         self.root.after(450, self._animate)
 
     # --- Методы для Assistant (вызываются из рабочих потоков) ----------------------------
@@ -214,7 +285,17 @@ class JarvisApp:
 
     def set_status(self, status: str) -> None:
         def apply():
+            if status == "thinking" and self._status != "thinking":
+                self._thinking_since = time.monotonic()
+                self._provider = ""
             self._status = status
+            self._render_status()
+
+        self._ui(apply)
+
+    def show_provider(self, name: str) -> None:
+        def apply():
+            self._provider = name
             self._render_status()
 
         self._ui(apply)
@@ -281,6 +362,29 @@ class JarvisApp:
     def _reset(self) -> None:
         self._tasks.put(("reset", None))
 
+    def _refresh_ai_menu(self) -> None:
+        """Список вариантов ИИ зависит от того, какие ключи заданы."""
+        brain = self.assistant.brain
+        menu = self.ai_menu["menu"]
+        menu.delete(0, "end")
+        for mode in brain.available_modes():
+            menu.add_command(label=MODES[mode], command=lambda m=mode: self._select_ai(m))
+        self.ai_var.set(MODES[brain.mode])
+
+    def _select_ai(self, mode: str) -> None:
+        brain = self.assistant.brain
+        brain.set_mode(mode)
+        self.ai_var.set(MODES[mode])
+        self.show_info(f"Мозг: {brain.describe()}.")
+
+    def _edit_keys(self) -> None:
+        dialog = KeysDialog(self.root, self.settings)
+        if not dialog.keys or not self.assistant:
+            return
+        gemini, deepseek = dialog.keys
+        save_api_keys(self.settings, gemini=gemini, deepseek=deepseek)
+        self._tasks.put(("reconfigure", None))
+
     def _on_close(self) -> None:
         if self._wake_stop:
             self._wake_stop.set()
@@ -303,6 +407,10 @@ class JarvisApp:
                 elif kind == "reset":
                     self.assistant.brain.reset()
                     self.show_info("Начат новый диалог.")
+                elif kind == "reconfigure":
+                    self.assistant.brain.reconfigure(self.settings)
+                    self._ui(self._refresh_ai_menu)
+                    self.show_info(f"Ключи сохранены. Мозг: {self.assistant.brain.describe()}.")
             except Exception as exc:
                 log.exception("Ошибка обработки")
                 self.show_info(f"Ошибка: {exc}", error=True)
@@ -310,18 +418,12 @@ class JarvisApp:
 
     # --- Запуск --------------------------------------------------------------------------
 
-    def _ask_api_key(self) -> bool:
-        key = simpledialog.askstring(
-            "Gemini API ключ",
-            "Вставьте ваш API-ключ Gemini.\n\nБесплатно получить ключ: https://aistudio.google.com/apikey\n"
-            "Ключ сохранится в файле .env рядом с программой.",
-            parent=self.root,
-            show="*",
-        )
-        if not key or not key.strip():
+    def _ask_api_keys(self) -> bool:
+        dialog = KeysDialog(self.root, self.settings)
+        if not dialog.keys:
             return False
-        save_api_key(key.strip())
-        self.settings.api_key = key.strip()
+        gemini, deepseek = dialog.keys
+        save_api_keys(self.settings, gemini=gemini, deepseek=deepseek)
         return True
 
     def run(self) -> None:
@@ -331,7 +433,7 @@ class JarvisApp:
                 self._hwnd = int(self.root.wm_frame(), 16)
             except (ValueError, tk.TclError):
                 self._hwnd = 0
-        if not self.settings.api_key and not self._ask_api_key():
+        if not self.settings.api_key and not self.settings.deepseek_api_key and not self._ask_api_keys():
             self.root.destroy()
             return
         try:
@@ -346,12 +448,13 @@ class JarvisApp:
             self.show_info(self.assistant.voice_error, error=True)
             self.mic_button.configure(state="disabled")
             self.wake_box.configure(state="disabled")
+        self._refresh_ai_menu()
         threading.Thread(target=self._worker, daemon=True, name="brain").start()
         hello = greeting(self.settings)
         self.show_reply(hello)
         self.show_info(
-            f"Модель: {self.settings.model}. Пишите в поле ниже, нажмите «Говорить» или включите фоновое "
-            f"прослушивание и скажите «{self.settings.assistant_name}, …»."
+            f"Мозг: {self.assistant.brain.describe()}. Пишите в поле ниже, нажмите «Говорить» или включите "
+            f"фоновое прослушивание и скажите «{self.settings.assistant_name}, …»."
         )
         self._tasks.put(("say", hello))
         self.set_status("idle")

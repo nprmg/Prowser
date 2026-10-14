@@ -141,7 +141,7 @@ def get_exchange_rates(currencies: str = "USD,EUR,CNY") -> dict:
     return {"date": data.get("Date", "")[:10], "rates": rates}
 
 
-@tool(enabled=lambda: runtime.settings.enable_google_search)
+@tool(enabled=lambda: runtime.settings.enable_google_search and runtime.client is not None)
 def search_internet(query: str) -> dict:
     """Найти актуальную информацию в интернете через Google Поиск (новости, события, факты, цены)
     и вернуть краткую сводку с источниками. Используй для вопросов о свежих событиях.

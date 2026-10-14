@@ -134,28 +134,34 @@ def _app_path(exe: str) -> str | None:
     return None
 
 
-def _shortcut_dirs() -> list[Path]:
-    dirs = []
+def _shortcut_paths() -> list[Path]:
+    """Ярлыки меню «Пуск» (с подпапками) и рабочего стола (только верхний уровень —
+    на рабочем столе бывают огромные папки, обход которых занимал бы минуты)."""
+    found: list[Path] = []
     for env in ("APPDATA", "PROGRAMDATA"):
         base = os.environ.get(env)
-        if base:
-            dirs.append(Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs")
-    dirs.append(known_folder("desktop"))
-    dirs.append(Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop")
-    return [d for d in dirs if d.is_dir()]
+        start_menu = Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" if base else None
+        if start_menu and start_menu.is_dir():
+            try:
+                found.extend(start_menu.rglob("*"))
+            except OSError:
+                pass
+    for desktop in (known_folder("desktop"), Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Desktop"):
+        if desktop.is_dir():
+            try:
+                found.extend(desktop.iterdir())
+            except OSError:
+                pass
+    return found
 
 
 def _find_shortcut(queries: list[str]) -> Path | None:
     shortcuts: dict[str, Path] = {}
-    for folder in _shortcut_dirs():
-        try:
-            for path in folder.rglob("*"):
-                if path.suffix.lower() in (".lnk", ".url", ".appref-ms"):
-                    name = path.stem
-                    if not any(bad in name.lower() for bad in _BAD_SHORTCUT_WORDS):
-                        shortcuts.setdefault(name, path)
-        except OSError:
-            continue
+    for path in _shortcut_paths():
+        if path.suffix.lower() in (".lnk", ".url", ".appref-ms"):
+            name = path.stem
+            if not any(bad in name.lower() for bad in _BAD_SHORTCUT_WORDS):
+                shortcuts.setdefault(name, path)
     for query in queries:
         match = _best_match(query, list(shortcuts))
         if match:
