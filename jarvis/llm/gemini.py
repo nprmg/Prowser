@@ -78,11 +78,12 @@ class GeminiProvider:
         # Время работы инструментов (диалоги подтверждения, команды) сюда не входит.
         budget, waited = max(base.MIN_TURN_BUDGET, self.timeout * 2), 0.0
         for _ in range(MAX_TOOL_ROUNDS):
+            runner.check_cancel()
             if budget - waited < 1:
                 raise ProviderError(self.name, "отвечает слишком медленно", retryable=True)
             started = time.monotonic()
             try:
-                response = self._generate(contents, system_prompt, min(self.timeout, budget - waited))
+                response = self._generate(contents, system_prompt, min(self.timeout, budget - waited), runner)
             finally:
                 waited += time.monotonic() - started
             calls = response.function_calls or []
@@ -109,13 +110,19 @@ class GeminiProvider:
         return TOO_MANY_STEPS
 
     def _generate(
-        self, contents: list[types.Content], system_prompt: str, timeout: float
+        self, contents: list[types.Content], system_prompt: str, timeout: float, runner: ToolRunner
     ) -> types.GenerateContentResponse:
         while True:
             config = self._config(system_prompt)
             config.http_options = types.HttpOptions(timeout=int(timeout * 1000), headers={"X-Server-Timeout": "60"})
             try:
-                return self.client.models.generate_content(model=self.model, contents=contents, config=config)
+                return base.run_with_deadline(
+                    lambda config=config: self.client.models.generate_content(
+                        model=self.model, contents=list(contents), config=config
+                    ),
+                    timeout,
+                    runner.cancel,
+                )
             except errors.APIError as exc:
                 # Модель не поддерживает этот уровень размышлений — пробуем следующий (или без него).
                 if self._thinking_levels and exc.code == 400 and "think" in str(exc).lower():
@@ -123,7 +130,7 @@ class GeminiProvider:
                     self._thinking_levels.pop(0)
                     continue
                 raise self._describe(exc) from exc
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, TimeoutError) as exc:
                 raise ProviderError(self.name, f"не ответил за {timeout:.0f} с", retryable=True) from exc
             except httpx.TransportError as exc:
                 raise ProviderError(

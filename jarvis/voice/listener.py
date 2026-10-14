@@ -75,6 +75,7 @@ class Listener:
         self.recognizer = sr.Recognizer()
         self.recognizer.dynamic_energy_threshold = True
         self.recognizer.pause_threshold = 0.8
+        self.recognizer.operation_timeout = 8  # без него зависший сервис распознавания блокирует голос навсегда
         self.microphone = SoundDeviceMicrophone(device=settings.mic_device)
         self._calibrated = False
         self._lock = threading.Lock()
@@ -98,7 +99,7 @@ class Listener:
             text = self.recognizer.recognize_google(audio, language=self.language)
         except sr.UnknownValueError:
             return None
-        except sr.RequestError as exc:
+        except (sr.RequestError, TimeoutError, OSError) as exc:
             raise ListenerError(f"Сервис распознавания речи недоступен: {exc}") from exc
         text = text.strip() if isinstance(text, str) else ""
         log.info("Распознано: %s", text)

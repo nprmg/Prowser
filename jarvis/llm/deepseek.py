@@ -2,6 +2,7 @@
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -64,11 +65,12 @@ class DeepSeekProvider:
         # Общий лимит ожидания модели за один ответ (все шаги), без времени работы инструментов.
         budget, waited = max(base.MIN_TURN_BUDGET, self.timeout * 2), 0.0
         for _ in range(MAX_TOOL_ROUNDS):
+            runner.check_cancel()
             if budget - waited < 1:
                 raise ProviderError(self.name, "отвечает слишком медленно", retryable=True)
             started = time.monotonic()
             try:
-                message = self._request(messages, thinking, min(self.timeout, budget - waited))
+                message = self._request(messages, thinking, min(self.timeout, budget - waited), runner.cancel)
             except ProviderError as exc:
                 # API не принял историю в режиме размышлений — этот ответ готовим без них.
                 if thinking == "enabled" and exc.status == 400 and "reasoning" in exc.detail.lower():
@@ -76,7 +78,9 @@ class DeepSeekProvider:
                     thinking = "disabled"
                     for item in messages:
                         item.pop("reasoning_content", None)
-                    message = self._request(messages, thinking, min(self.timeout, max(1.0, budget - waited)))
+                    message = self._request(
+                        messages, thinking, min(self.timeout, max(1.0, budget - waited)), runner.cancel
+                    )
                 else:
                     raise
             finally:
@@ -107,7 +111,9 @@ class DeepSeekProvider:
                 })
         return TOO_MANY_STEPS
 
-    def _request(self, messages: list[dict[str, Any]], thinking: str, timeout: float) -> dict[str, Any]:
+    def _request(
+        self, messages: list[dict[str, Any]], thinking: str, timeout: float, cancel: threading.Event
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -117,24 +123,29 @@ class DeepSeekProvider:
             "stream": False,
             "thinking": {"type": thinking},
         }
-        deadline = time.monotonic() + timeout
-        try:
-            # Под нагрузкой DeepSeek держит соединение пустыми строками (обычный таймаут чтения
-            # тогда не срабатывает), поэтому читаем тело по частям и сами следим за общим временем.
+        abandoned = threading.Event()
+
+        def call() -> tuple[int, bytes]:
+            # Под нагрузкой DeepSeek держит соединение пустыми строками (таймаут чтения тогда
+            # не срабатывает), поэтому тело читаем по частям и бросаем, когда ответ больше не ждут.
             with self.client.stream(
                 "POST", "/chat/completions", json=body, timeout=httpx.Timeout(timeout, connect=min(10.0, timeout))
             ) as response:
                 chunks = []
                 for chunk in response.iter_bytes():
+                    if abandoned.is_set():
+                        raise httpx.ReadTimeout("abandoned")
                     chunks.append(chunk)
-                    if time.monotonic() > deadline:
-                        raise httpx.ReadTimeout("deadline")
-                raw = b"".join(chunks)
-                status = response.status_code
-        except httpx.TimeoutException as exc:
+                return response.status_code, b"".join(chunks)
+
+        try:
+            status, raw = base.run_with_deadline(call, timeout, cancel)
+        except (httpx.TimeoutException, TimeoutError) as exc:
             raise ProviderError(self.name, f"не ответил за {timeout:.0f} с", retryable=True) from exc
         except httpx.TransportError as exc:
             raise ProviderError(self.name, "нет связи с сервером (проверьте интернет)", retryable=True) from exc
+        finally:
+            abandoned.set()  # если ответ ещё идёт в фоне — закрыть соединение
         try:
             data = json.loads(raw.decode("utf-8", "replace") or "{}")
         except json.JSONDecodeError:

@@ -46,6 +46,7 @@ def _normalize(text: str, wake_words: list[str]) -> str:
     for word in wake_words:
         text = re.sub(rf"\b{re.escape(word)}\w*", " ", text)
     text = _POLITE.sub(" ", text)
+    text = re.sub(r"\.exe\b", "", text)  # «открой notepad.exe» -> «открой notepad»
     # Знаки препинания из набранного текста. Запятые тоже убираем: все шаблоны сравниваются
     # с фразой целиком, так что «открой блокнот, напиши привет» всё равно уйдёт в ИИ.
     text = re.sub(r"[.,!?…«»\"'—–:]", " ", text)

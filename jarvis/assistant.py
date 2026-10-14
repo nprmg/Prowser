@@ -117,26 +117,32 @@ class Assistant:
 
     # --- Голос --------------------------------------------------------------------------
 
-    def listen_command(self) -> None:
-        """Одна голосовая команда без слова-активатора (кнопка микрофона)."""
+    def listen_text(self) -> str | None:
+        """Слушает одну фразу без слова-активатора (кнопка микрофона) и возвращает текст."""
         from .voice.listener import ListenerError
 
         if not self.listener:
             self.ui.show_info(self.voice_error, error=True)
-            return
+            return None
         self.speaker.stop()
         self.ui.set_status("listening")
         try:
             text = self.listener.listen_once(timeout=7)
         except ListenerError as exc:
             self.ui.show_info(str(exc), error=True)
+            text = None
+        else:
+            if not text:
+                self.ui.show_info("Не расслышал, попробуйте ещё раз.")
+        if not text:
             self.ui.set_status("idle")
-            return
+        return text
+
+    def listen_command(self) -> None:
+        """Одна голосовая команда без слова-активатора."""
+        text = self.listen_text()
         if text:
             self.handle(text, "voice")
-        else:
-            self.ui.show_info("Не расслышал, попробуйте ещё раз.")
-            self.ui.set_status("idle")
 
     def request_direct_command(self) -> None:
         """Во время фонового прослушивания: следующая фраза считается командой без слова-активатора."""

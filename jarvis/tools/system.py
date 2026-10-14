@@ -374,12 +374,18 @@ def look_at_screen(question: str = "Опиши, что сейчас на экр�
     image.thumbnail((1920, 1920))
     buffer = io.BytesIO()
     image.save(buffer, "JPEG", quality=85)
-    response = runtime.client.models.generate_content(
-        model=runtime.settings.model,
-        contents=[
-            types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg"),
-            f"Это скриншот экрана пользователя. {question}. Ответь по-русски, кратко и по делу.",
-        ],
+    from ..llm.base import run_with_deadline
+
+    client = runtime.client
+    response = run_with_deadline(
+        lambda: client.models.generate_content(
+            model=runtime.settings.model,
+            contents=[
+                types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg"),
+                f"Это скриншот экрана пользователя. {question}. Ответь по-русски, кратко и по делу.",
+            ],
+        ),
+        timeout=45,
     )
     return response.text or "Не удалось разобрать изображение."
 

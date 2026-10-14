@@ -105,7 +105,10 @@ class JarvisApp:
         self.settings = settings
         self.assistant: Assistant | None = None
         self._ui_queue: queue.Queue = queue.Queue()
-        self._tasks: queue.Queue = queue.Queue()
+        self._tasks: queue.Queue = queue.Queue()  # запросы к ИИ — по одному
+        self._quick_tasks: queue.Queue = queue.Queue()  # быстрые команды не ждут ИИ
+        self._active = 0  # сколько запросов сейчас выполняется (оба рабочих потока)
+        self._active_lock = threading.Lock()
         self._wake_stop: threading.Event | None = None
         self._status = "idle"
         self._provider = ""  # какой ИИ сейчас думает
@@ -293,7 +296,10 @@ class JarvisApp:
 
     def set_status(self, status: str) -> None:
         def apply():
-            self._status = status
+            with self._active_lock:
+                busy = self._active
+            # Быстрая команда закончилась, а запрос к ИИ ещё идёт — показываем, что он думает.
+            self._status = "thinking" if status == "idle" and busy else status
             self._render_status()
 
         self._ui(apply)
@@ -302,8 +308,11 @@ class JarvisApp:
         """Новый запрос: обнуляем таймер «Думаю… N с» и имя ИИ."""
 
         def apply():
-            self._thinking_since = time.monotonic()
-            self._provider = ""
+            with self._active_lock:
+                busy = self._active
+            if busy <= 1:  # параллельная быстрая команда не сбрасывает таймер долгого запроса
+                self._thinking_since = time.monotonic()
+                self._provider = ""
 
         self._ui(apply)
 
@@ -334,24 +343,37 @@ class JarvisApp:
 
     # --- Действия пользователя -----------------------------------------------------------
 
+    def _submit(self, text: str, source: str) -> None:
+        """Быстрые команды — в свою очередь, чтобы не ждать медленный ответ ИИ."""
+        tasks = self._quick_tasks if self.assistant.brain.is_quick(text) else self._tasks
+        tasks.put((source, text))
+
     def _send_text(self) -> None:
         text = self.entry.get().strip()
         if not text or not self.assistant:
             return
         self.entry.delete(0, "end")
-        self._tasks.put(("text", text))
+        self._submit(text, "text")
 
     def _on_mic(self) -> None:
         if not self.assistant:
             return
         if self._wake_stop and not self._wake_stop.is_set():
             self.assistant.request_direct_command()
-        else:
-            self._tasks.put(("listen", None))
+            return
+
+        def listen() -> None:
+            text = self.assistant.listen_text()
+            if text:
+                self._submit(text, "voice")
+
+        threading.Thread(target=listen, daemon=True, name="mic").start()
 
     def _stop_speech(self) -> None:
+        """«■ Стоп»: замолчать и прервать текущий запрос к ИИ."""
         if self.assistant:
             self.assistant.speaker.stop()
+            self.assistant.brain.cancel()
 
     def _toggle_wake(self) -> None:
         if not self.assistant:
@@ -374,7 +396,9 @@ class JarvisApp:
                 self.assistant.speaker.stop()
 
     def _reset(self) -> None:
-        self._tasks.put(("reset", None))
+        if self.assistant:
+            self.assistant.brain.reset()
+            self.show_info("Начат новый диалог.")
 
     def _refresh_ai_menu(self) -> None:
         """Список вариантов ИИ зависит от того, какие ключи заданы."""
@@ -408,19 +432,16 @@ class JarvisApp:
 
     # --- Рабочий поток -------------------------------------------------------------------
 
-    def _worker(self) -> None:
+    def _worker(self, tasks: queue.Queue) -> None:
         while True:
-            kind, payload = self._tasks.get()
+            kind, payload = tasks.get()
+            with self._active_lock:
+                self._active += 1
             try:
-                if kind == "text":
-                    self.assistant.handle(payload, "text")
-                elif kind == "listen":
-                    self.assistant.listen_command()
+                if kind in ("text", "voice"):
+                    self.assistant.handle(payload, kind)
                 elif kind == "say":
                     self.assistant.say(payload)
-                elif kind == "reset":
-                    self.assistant.brain.reset()
-                    self.show_info("Начат новый диалог.")
                 elif kind == "reconfigure":
                     self.assistant.brain.reconfigure(self.settings)
                     self._ui(self._refresh_ai_menu)
@@ -428,6 +449,9 @@ class JarvisApp:
             except Exception as exc:
                 log.exception("Ошибка обработки")
                 self.show_info(f"Ошибка: {exc}", error=True)
+            finally:
+                with self._active_lock:
+                    self._active -= 1
                 self.set_status("idle")
 
     # --- Запуск --------------------------------------------------------------------------
@@ -466,7 +490,8 @@ class JarvisApp:
             self.mic_button.configure(state="disabled")
             self.wake_box.configure(state="disabled")
         self._refresh_ai_menu()
-        threading.Thread(target=self._worker, daemon=True, name="brain").start()
+        threading.Thread(target=self._worker, args=(self._tasks,), daemon=True, name="brain").start()
+        threading.Thread(target=self._worker, args=(self._quick_tasks,), daemon=True, name="quick").start()
         hello = greeting(self.settings)
         self.show_reply(hello)
         self.show_info(

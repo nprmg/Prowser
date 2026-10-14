@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from . import quick
 from .config import Settings
-from .llm.base import COOLDOWN_QUOTA, Provider, ProviderError, ToolRunner, Turn
+from .llm.base import COOLDOWN_QUOTA, Cancelled, Provider, ProviderError, ToolRunner, Turn
 from .llm.prompt import build_system_prompt, with_done_note
 from .runtime import runtime
 
@@ -33,6 +33,7 @@ class Brain:
         self.on_provider = on_provider or (lambda name: None)
         self._lock = threading.Lock()  # один запрос к ИИ за раз
         self._history_lock = threading.Lock()  # короткая блокировка только для истории
+        self._cancel = threading.Event()  # «Стоп»: прервать текущий запрос к ИИ
         self.history: list[Turn] = []
         self.last_provider = ""
         self.mode = ""
@@ -99,6 +100,15 @@ class Brain:
             return f"{names[0]}, запасной — {', '.join(names[1:])}"
         return names[0]
 
+    def cancel(self) -> None:
+        """Прерывает текущий запрос к ИИ (кнопка «Стоп»)."""
+        self._cancel.set()
+
+    def is_quick(self, text: str) -> bool:
+        """Будет ли фраза выполнена мгновенно, без ИИ."""
+        settings = self.settings
+        return settings.fast_commands and quick.match(text, settings.wake_words, settings.user_title) is not None
+
     def reset(self) -> None:
         """Начать новый диалог (забыть историю)."""
         with self._history_lock:
@@ -134,7 +144,19 @@ class Brain:
             return self._ask_llm(text)
 
     def _ask_llm(self, text: str) -> str:
-        runner = ToolRunner(self.on_tool_call)
+        self._cancel.clear()
+        runner = ToolRunner(self.on_tool_call, self._cancel)
+        try:
+            return self._try_providers(text, runner)
+        except Cancelled:
+            reply = "Хорошо, остановился."
+            if runner.done:
+                done = ", ".join(dict.fromkeys(item.split("(", 1)[0] for item in runner.done))
+                reply += f" Уже успел выполнить: {done}."
+            self._remember(text, reply)
+            return reply
+
+    def _try_providers(self, text: str, runner: ToolRunner) -> str:
         started_at = time.monotonic()
         with self._history_lock:
             history = list(self.history)
@@ -152,6 +174,8 @@ class Brain:
                 reply = provider.run_turn(self.system_prompt, history, with_done_note(text, runner.done), runner)
             except ProviderError as exc:
                 error = exc
+            except Cancelled:
+                raise
             except Exception as exc:  # неожиданная ошибка не должна ронять ассистента
                 log.exception("Ошибка провайдера %s", provider.name)
                 error = ProviderError(provider.name, f"внутренняя ошибка: {exc}", cooldown=0)
@@ -178,7 +202,8 @@ class Brain:
                 retried = True
                 again = "" if retry == key else f" через {allowed[retry].name}"
                 self.on_notice(f"{provider.name} {error.reason}. Пробую ещё раз{again}…")
-                time.sleep(RETRY_DELAY)
+                if self._cancel.wait(RETRY_DELAY):
+                    raise Cancelled()
                 queue.append((retry, allowed[retry]))
         reasons = "; ".join(dict.fromkeys(f"{e.provider} {e.reason}" for _, e in failures))
         reply = f"Простите, {self.settings.user_title}, не удалось получить ответ: {reasons}."

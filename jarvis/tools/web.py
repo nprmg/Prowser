@@ -151,10 +151,16 @@ def search_internet(query: str) -> dict:
     """
     from google.genai import types
 
-    response = runtime.client.models.generate_content(
-        model=runtime.settings.model,
-        contents=f"Найди в интернете и кратко ответь на русском: {query}",
-        config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
+    from ..llm.base import run_with_deadline
+
+    client = runtime.client
+    response = run_with_deadline(
+        lambda: client.models.generate_content(
+            model=runtime.settings.model,
+            contents=f"Найди в интернете и кратко ответь на русском: {query}",
+            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]),
+        ),
+        timeout=45,
     )
     sources = []
     candidate = (response.candidates or [None])[0]

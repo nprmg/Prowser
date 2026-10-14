@@ -3,8 +3,10 @@
 import ctypes
 import difflib
 import json
+import logging
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Literal
@@ -14,6 +16,8 @@ import psutil
 from ._platform import IS_MAC, IS_WIN, launch, powershell, run
 from .files import known_folder
 from .registry import tool
+
+log = logging.getLogger("jarvis.tools")
 
 # Известные программы: голосовые названия, как запускать и как называются их процессы.
 APPS: dict[str, dict] = {
@@ -84,7 +88,7 @@ def _norm(text: str) -> str:
 
 
 def _find_spec(name: str) -> tuple[str | None, dict]:
-    query = _norm(name)
+    query = _norm(name).removesuffix(".exe")
     aliases: dict[str, str] = {}
     for title, spec in APPS.items():
         for alias in [_norm(title), *spec["names"]]:
@@ -169,16 +173,30 @@ def _find_shortcut(queries: list[str]) -> Path | None:
     return None
 
 
-def _find_start_app(queries: list[str]) -> tuple[str, str] | None:
-    """Ищет программу среди всех приложений меню «Пуск», включая приложения из Microsoft Store."""
-    result = powershell("Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress", timeout=25)
+_start_apps_cache: tuple[float, dict[str, str]] | None = None
+
+
+def _start_apps() -> dict[str, str]:
+    """Все приложения меню «Пуск» (включая Microsoft Store): имя -> AppID. Кэшируется на 5 минут."""
+    global _start_apps_cache
+    if _start_apps_cache and time.monotonic() - _start_apps_cache[0] < 300:
+        return _start_apps_cache[1]
     try:
+        result = powershell("Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress", timeout=10)
         data = json.loads(result.stdout.strip() or "[]")
-    except json.JSONDecodeError:
-        return None
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        log.warning("Не удалось получить список приложений «Пуска»: %s", exc)
+        return {}
     if isinstance(data, dict):
         data = [data]
     apps = {item["Name"]: item["AppID"] for item in data if item.get("Name") and item.get("AppID")}
+    _start_apps_cache = (time.monotonic(), apps)
+    return apps
+
+
+def _find_start_app(queries: list[str]) -> tuple[str, str] | None:
+    """Ищет программу среди всех приложений меню «Пуск», включая приложения из Microsoft Store."""
+    apps = _start_apps()
     for query in queries:
         match = _best_match(query, list(apps))
         if match and not any(bad in match.lower() for bad in _BAD_SHORTCUT_WORDS):
@@ -198,6 +216,12 @@ def _launch_windows(name: str, title: str | None, spec: dict) -> str | None:
         if path:
             os.startfile(path)  # type: ignore[attr-defined]
             return title or Path(path).stem
+    # Прямой путь к .exe (реестр App Paths или PATH) — мгновенно, поэтому раньше поиска по ярлыкам.
+    exe = name if name.lower().endswith(".exe") else f"{name}.exe"
+    path = _app_path(exe) or shutil.which(exe)
+    if path:
+        os.startfile(path)  # type: ignore[attr-defined]
+        return Path(path).stem
     queries = [*spec.get("search", []), *([title] if title else []), name]
     shortcut = _find_shortcut(queries)
     if shortcut:
@@ -207,11 +231,6 @@ def _launch_windows(name: str, title: str | None, spec: dict) -> str | None:
     if start_app:
         launch(["explorer.exe", f"shell:AppsFolder\\{start_app[1]}"])
         return start_app[0]
-    exe = name if name.lower().endswith(".exe") else f"{name}.exe"
-    path = _app_path(exe) or shutil.which(name)
-    if path:
-        os.startfile(path)  # type: ignore[attr-defined]
-        return Path(path).stem
     return None
 
 

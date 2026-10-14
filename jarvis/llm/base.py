@@ -2,6 +2,9 @@
 
 import json
 import logging
+import queue
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Protocol
 
@@ -41,18 +44,59 @@ class ProviderError(Exception):
         self.cooldown = cooldown  # сколько секунд пропускать этого провайдера в режиме «Авто» (0 — не пропускать)
 
 
+class Cancelled(Exception):
+    """Пользователь остановил запрос кнопкой «Стоп»."""
+
+
+def run_with_deadline(func: Callable[[], Any], timeout: float, cancel: threading.Event | None = None) -> Any:
+    """Выполняет func() в фоновом потоке и ждёт не дольше timeout секунд по настенным часам.
+
+    Таймауты httpx считаются на каждое чтение из сети, поэтому ответ, который приходит «по капле»,
+    может тянуться минутами. Здесь лимит общий; брошенный вызов доработает в фоне и будет забыт.
+    """
+    box: queue.Queue = queue.Queue(maxsize=1)
+
+    def target() -> None:
+        try:
+            box.put((True, func()))
+        except BaseException as exc:  # noqa: BLE001 — передаём любую ошибку в вызывающий поток
+            box.put((False, exc))
+
+    threading.Thread(target=target, daemon=True, name="llm-call").start()
+    deadline = time.monotonic() + timeout
+    while True:
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"no answer in {timeout:.0f}s")
+        try:
+            ok, value = box.get(timeout=min(0.2, remaining))
+        except queue.Empty:
+            continue
+        if ok:
+            return value
+        raise value
+
+
 class ToolRunner:
     """Выполняет инструменты в рамках одного запроса и запоминает, что уже сделано.
 
     Если провайдер упал посреди запроса, запасной получит список сделанного и не повторит действия.
     """
 
-    def __init__(self, on_tool_call: Callable[[str, dict[str, Any]], None]):
+    def __init__(self, on_tool_call: Callable[[str, dict[str, Any]], None], cancel: threading.Event | None = None):
         self.on_tool_call = on_tool_call
+        self.cancel = cancel or threading.Event()  # установлен — пользователь нажал «Стоп»
         self.done: list[str] = []
         self.reasoning = ""  # reasoning_content финального ответа (только DeepSeek)
 
+    def check_cancel(self) -> None:
+        if self.cancel.is_set():
+            raise Cancelled()
+
     def run(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.check_cancel()  # после «Стоп» новые действия не выполняем
         self.on_tool_call(name, args)
         result = tools.execute(name, args)
         log.info("tool %s(%s) -> %s", name, args, str(result)[:500])
