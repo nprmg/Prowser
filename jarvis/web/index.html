@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Джарвис</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app" data-state="idle">
+  <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
+
+  <header class="titlebar pywebview-drag-region">
+    <div class="brand pywebview-drag-region">
+      <span class="logo" data-logo></span>
+      <span class="brand-name" id="brandName">Джарвис</span>
+      <span class="status" id="status">Запуск…</span>
+    </div>
+    <div class="segmented" id="aiMode" role="radiogroup" aria-label="Какой ИИ отвечает"></div>
+    <div class="window-actions">
+      <button class="icon-btn" id="btnSettings" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6"/></svg>
+      </button>
+      <button class="icon-btn" id="btnMinimize" title="Свернуть" aria-label="Свернуть">
+        <svg viewBox="0 0 20 20"><path d="M5 10.5h10"/></svg>
+      </button>
+      <button class="icon-btn close" id="btnClose" title="Скрыть в трей" aria-label="Закрыть">
+        <svg viewBox="0 0 20 20"><path d="M6 6l8 8M14 6l-8 8"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="conversation" id="log" aria-live="polite">
+    <section class="empty" id="empty">
+      <span class="logo logo-hero" data-logo></span>
+      <h1 id="hello">Чем могу помочь?</h1>
+      <p class="muted">Напишите, нажмите микрофон или скажите «<span class="wake-name">Джарвис</span>, …»</p>
+      <div class="chips" id="chips">
+        <button class="chip">Какая погода сейчас?</button>
+        <button class="chip">Открой блокнот</button>
+        <button class="chip">Что нового в мире?</button>
+        <button class="chip">Курс биткоина</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="composer-wrap">
+    <div class="composer glass" id="composer">
+      <button class="round-btn mic" id="btnMic" title="Сказать" aria-label="Сказать голосом">
+        <span class="mic-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <svg viewBox="0 0 20 20" class="mic-icon"><rect x="7.2" y="2.8" width="5.6" height="9.4" rx="2.8"/><path d="M4.6 9.6a5.4 5.4 0 0 0 10.8 0M10 15v2.4"/></svg>
+      </button>
+      <textarea id="input" rows="1" placeholder="Сообщение…" spellcheck="true"></textarea>
+      <button class="round-btn stop" id="btnStop" title="Остановить" aria-label="Остановить">
+        <svg viewBox="0 0 20 20"><rect x="6" y="6" width="8" height="8" rx="1.6"/></svg>
+      </button>
+      <button class="round-btn send" id="btnSend" title="Отправить" aria-label="Отправить">
+        <svg viewBox="0 0 20 20"><path d="M10 15.5V4.8M5.6 9.2L10 4.8l4.4 4.4"/></svg>
+      </button>
+    </div>
+    <div class="quick-toggles">
+      <label class="pill-toggle"><input type="checkbox" id="tglWake"><span>Слушать «<span class="wake-name">Джарвис</span>»</span></label>
+      <label class="pill-toggle"><input type="checkbox" id="tglTts"><span>Озвучка</span></label>
+      <button class="link-btn" id="btnReset">Новый диалог</button>
+    </div>
+  </footer>
+
+  <aside class="sheet glass" id="settings" aria-hidden="true">
+    <div class="sheet-head">
+      <h2>Настройки</h2>
+      <button class="icon-btn" id="btnSettingsClose" aria-label="Закрыть настройки">
+        <svg viewBox="0 0 20 20"><path d="M6 6l8 8M14 6l-8 8"/></svg>
+      </button>
+    </div>
+    <form class="sheet-body" id="settingsForm" autocomplete="off">
+      <h3>Искусственный интеллект</h3>
+      <div class="group">
+        <label class="row"><span>Ключ Gemini</span><input type="password" name="gemini_key" placeholder="бесплатно: aistudio.google.com"></label>
+        <label class="row"><span>Ключ DeepSeek</span><input type="password" name="deepseek_key" placeholder="platform.deepseek.com"></label>
+      </div>
+      <p class="note">Достаточно одного ключа. Если указаны оба, при сбое Gemini ответит DeepSeek.</p>
+
+      <h3>Голос</h3>
+      <div class="group">
+        <label class="row"><span>Голос</span><select name="voice_profile" id="voiceSelect"></select></label>
+        <label class="row switch-row"><span>Озвучивать ответы</span><input type="checkbox" class="switch" name="tts"></label>
+        <label class="row switch-row"><span>Слушать «<span class="wake-name">Джарвис</span>» всегда</span><input type="checkbox" class="switch" name="listen_on_start"></label>
+        <label class="row switch-row"><span>Значок в углу экрана</span><input type="checkbox" class="switch" name="overlay"></label>
+      </div>
+
+      <h3>Агент</h3>
+      <div class="group">
+        <label class="row switch-row"><span>Полный доступ к компьютеру</span><input type="checkbox" class="switch" name="full_access"></label>
+        <label class="row switch-row"><span>Спрашивать перед выключением ПК</span><input type="checkbox" class="switch" name="confirm_power"></label>
+        <label class="row switch-row"><span>Запускать вместе с Windows</span><input type="checkbox" class="switch" name="autostart"></label>
+        <label class="row switch-row"><span>Мгновенные простые команды</span><input type="checkbox" class="switch" name="fast_commands"></label>
+      </div>
+      <p class="note">В режиме полного доступа Джарвис выполняет команды, удаляет и перемещает файлы, управляет мышью без вопросов. Выключение и перезагрузка — только с подтверждением, если оно включено.</p>
+
+      <h3>Интеграции</h3>
+      <div class="group">
+        <label class="row"><span>Telegram-бот: токен</span><input type="password" name="telegram_token" placeholder="от @BotFather"></label>
+        <label class="row"><span>Telegram: ваш chat id</span><input type="text" name="telegram_chat_ids" placeholder="бот подскажет на /start"></label>
+        <label class="row"><span>Home Assistant: адрес</span><input type="text" name="ha_url" placeholder="http://192.168.1.10:8123"></label>
+        <label class="row"><span>Home Assistant: токен</span><input type="password" name="ha_token" placeholder="долгосрочный токен"></label>
+      </div>
+      <p class="note">Погода, курсы, новости и Википедия работают без настроек.</p>
+
+      <div class="sheet-actions">
+        <button type="submit" class="primary-btn">Сохранить</button>
+      </div>
+    </form>
+  </aside>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <div class="modal glass" id="confirm" role="alertdialog" aria-modal="true" hidden>
+    <h2>Подтверждение</h2>
+    <p id="confirmText"></p>
+    <div class="modal-actions">
+      <button class="secondary-btn" id="confirmNo">Отмена</button>
+      <button class="primary-btn" id="confirmYes">Выполнить</button>
+    </div>
+  </div>
+  <div class="toast" id="toast" hidden></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

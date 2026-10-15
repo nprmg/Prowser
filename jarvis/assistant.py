@@ -1,0 +1,227 @@
+"""Контроллер: связывает мозг (Gemini), голос и интерфейс (GUI или консоль)."""
+
+import logging
+import threading
+import time
+from datetime import datetime
+from typing import Any, Protocol
+
+from .brain import Brain
+from .config import Settings
+from .runtime import runtime
+from .voice import Speaker
+
+log = logging.getLogger("jarvis")
+
+
+class UI(Protocol):
+    def show_user(self, text: str, source: str) -> None: ...
+    def show_reply(self, text: str) -> None: ...
+    def show_tool(self, name: str, args: dict[str, Any]) -> None: ...
+    def show_info(self, text: str, error: bool = False) -> None: ...
+    def set_status(self, status: str) -> None: ...  # idle | listening | thinking | speaking
+    def confirm(self, prompt: str) -> bool: ...
+
+
+def greeting(settings: Settings) -> str:
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        part = "Доброе утро"
+    elif 12 <= hour < 18:
+        part = "Добрый день"
+    elif 18 <= hour < 23:
+        part = "Добрый вечер"
+    else:
+        part = "Доброй ночи"
+    return f"{part}, {settings.user_title}. {settings.assistant_name} к вашим услугам."
+
+
+class Assistant:
+    def __init__(self, settings: Settings, ui: UI):
+        self.settings = settings
+        self.ui = ui
+        self.speaker = Speaker(settings)
+        self.brain = Brain(
+            settings,
+            on_tool_call=ui.show_tool,
+            on_notice=lambda text: ui.show_info(text),
+            on_provider=getattr(ui, "show_provider", None),  # необязательно: показать, какой ИИ думает
+        )
+        self.listener = None
+        self.voice_error = ""
+        try:
+            from .voice.listener import Listener
+
+            self.listener = Listener(settings)
+        except Exception as exc:  # нет sounddevice/PortAudio/SpeechRecognition — работаем только чатом
+            self.voice_error = f"Голосовой ввод недоступен: {exc}"
+            log.warning(self.voice_error)
+        self._local = threading.local()
+        self._direct_next = threading.Event()
+        self.telegram = None
+        runtime.confirm = self._confirm
+        runtime.notify = self._notify
+        self.start_integrations()
+
+    def start_integrations(self) -> None:
+        """Telegram-мост запускается, если в настройках есть токен бота и разрешённые чаты."""
+        if self.settings.telegram_token and self.settings.telegram_chat_ids:
+            if self.telegram is None:
+                from .telegram_bot import TelegramBridge
+
+                self.telegram = TelegramBridge(self)
+            self.telegram.start()
+        elif self.telegram is not None:
+            self.telegram.stop()
+
+    # --- Обработка запросов -------------------------------------------------------------
+
+    def handle(self, text: str, source: str = "text", reply_to: str = "") -> str:
+        """Обрабатывает одну просьбу пользователя (блокирует до конца ответа и озвучки).
+
+        source: text | voice | telegram; reply_to — чат Telegram, откуда пришла просьба.
+        """
+        self._local.source = source
+        self._local.reply_to = reply_to
+        self.ui.show_user(text, source)
+        getattr(self.ui, "begin_request", lambda: None)()
+        self.ui.set_status("thinking")
+        reply = self.brain.ask(text)
+        self.ui.show_reply(reply)
+        if source == "telegram":  # ответ уйдёт в Telegram; вслух на компьютере не читаем
+            self.ui.set_status("idle")
+        else:
+            self.say(reply)
+        return reply
+
+    def say(self, text: str) -> None:
+        if self.speaker.enabled:
+            self.ui.set_status("speaking")
+            self.speaker.say(text)
+        self.ui.set_status("idle")
+
+    def _notify(self, message: str) -> None:
+        """Сработал таймер или напоминание."""
+        self.ui.show_info(f"⏰ {message}")
+        threading.Thread(target=self.say, args=(f"{self.settings.user_title}, напоминаю: {message}",), daemon=True).start()
+
+    # --- Подтверждение опасных действий -------------------------------------------------
+
+    def _confirm(self, prompt: str) -> bool:
+        source = getattr(self._local, "source", "text")
+        if source == "telegram" and self.telegram is not None:
+            return self.telegram.confirm(self._local.reply_to, prompt)
+        if source == "voice" and self.listener:
+            return self.confirm_by_voice(prompt)
+        return self.ui.confirm(prompt)
+
+    def confirm_by_voice(self, prompt: str) -> bool:
+        from .voice.listener import ListenerError, parse_yes_no
+
+        self.ui.show_info(f"Подтверждение: {prompt}")
+        self.say(f"{prompt} Скажите «да» или «нет».")
+        for _attempt in range(2):
+            self.ui.set_status("listening")
+            try:
+                answer = self.listener.listen_once(timeout=7, phrase_time_limit=5) or ""
+            except ListenerError as exc:
+                self.ui.show_info(str(exc), error=True)
+                break
+            verdict = parse_yes_no(answer)
+            if answer:
+                self.ui.show_user(answer, "voice")
+            if verdict is not None:
+                self.ui.set_status("thinking")
+                return verdict
+            self.say("Не расслышал. Да или нет?")
+        self.ui.set_status("thinking")
+        self.ui.show_info("Действие отменено: подтверждение не получено.")
+        return False
+
+    # --- Голос --------------------------------------------------------------------------
+
+    def listen_text(self) -> str | None:
+        """Слушает одну фразу без слова-активатора (кнопка микрофона) и возвращает текст."""
+        from .voice.listener import ListenerError
+
+        if not self.listener:
+            self.ui.show_info(self.voice_error, error=True)
+            return None
+        self.speaker.stop()
+        self.ui.set_status("listening")
+        try:
+            text = self.listener.listen_once(timeout=7)
+        except ListenerError as exc:
+            self.ui.show_info(str(exc), error=True)
+            text = None
+        else:
+            if not text:
+                self.ui.show_info("Не расслышал, попробуйте ещё раз.")
+        if not text:
+            self.ui.set_status("idle")
+        return text
+
+    def listen_command(self) -> None:
+        """Одна голосовая команда без слова-активатора."""
+        text = self.listen_text()
+        if text:
+            self.handle(text, "voice")
+
+    def request_direct_command(self) -> None:
+        """Во время фонового прослушивания: следующая фраза считается командой без слова-активатора."""
+        self.speaker.stop()
+        self._direct_next.set()
+        self.ui.set_status("listening")
+
+    def wake_word_loop(self, stop: threading.Event) -> None:
+        """Слушает микрофон и реагирует на фразы со словом-активатором («Джарвис, …»)."""
+        from .voice.listener import ListenerError, split_wake_word
+
+        if not self.listener:
+            self.ui.show_info(self.voice_error, error=True)
+            return
+        errors_in_row = 0
+        while not stop.is_set():
+            while self.speaker.speaking.is_set() and not stop.is_set():
+                time.sleep(0.1)
+            try:
+                text = self.listener.listen_once(timeout=4)
+                errors_in_row = 0
+            except ListenerError as exc:
+                errors_in_row += 1
+                if errors_in_row in (1, 5):
+                    self.ui.show_info(str(exc), error=True)
+                time.sleep(min(30, 2 * errors_in_row))
+                continue
+            if stop.is_set() or not text or self.speaker.speaking.is_set():
+                continue
+            if self._direct_next.is_set():
+                self._direct_next.clear()
+                self._handle_safely(text)
+                continue
+            found, command = split_wake_word(text, self.settings.wake_words)
+            if not found:
+                log.debug("Без слова-активатора: %s", text)
+                continue
+            if not command:
+                self.ui.show_user(text, "voice")
+                self.say(f"Да, {self.settings.user_title}?")
+                self.ui.set_status("listening")
+                try:
+                    command = self.listener.listen_once(timeout=7) or ""
+                except ListenerError as exc:
+                    self.ui.show_info(str(exc), error=True)
+                    command = ""
+                if not command:
+                    self.ui.set_status("idle")
+                    continue
+            self._handle_safely(command)
+
+    def _handle_safely(self, text: str) -> None:
+        """Ошибка в одной команде не должна останавливать фоновое прослушивание."""
+        try:
+            self.handle(text, "voice")
+        except Exception as exc:
+            log.exception("Ошибка обработки голосовой команды")
+            self.ui.show_info(f"Ошибка: {exc}", error=True)
+            self.ui.set_status("idle")
