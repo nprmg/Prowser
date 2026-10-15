@@ -4,7 +4,7 @@
 в стиле Google (описание + секция Args) и пометьте её декоратором @tool().
 """
 
-from . import apps, files, input_control, system, timers, web  # noqa: F401  (регистрация инструментов)
+from . import apps, files, input_control, integrations, screen, system, timers, web  # noqa: F401
 from .registry import TOOLS, active_tools, declarations, execute, tool
 
 __all__ = ["TOOLS", "active_tools", "declarations", "execute", "tool"]

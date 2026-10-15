@@ -1,6 +1,7 @@
 """Общее состояние, которое интерфейс (GUI/консоль) передаёт инструментам."""
 
 import logging
+import threading
 from typing import Any, Callable
 
 from .config import Settings
@@ -24,6 +25,8 @@ class Runtime:
         self.notify: Callable[[str], None] = lambda text: log.info("notify: %s", text)
         # Вызывается перед вводом с клавиатуры, чтобы окно ассистента не перехватило нажатия.
         self.release_focus: Callable[[], None] = lambda: None
+        # Установлен, когда пользователь нажал «Стоп» (долгие инструменты, например wait, его проверяют).
+        self.cancel = threading.Event()
 
 
 runtime = Runtime()

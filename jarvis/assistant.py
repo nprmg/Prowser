@@ -58,20 +58,40 @@ class Assistant:
             log.warning(self.voice_error)
         self._local = threading.local()
         self._direct_next = threading.Event()
+        self.telegram = None
         runtime.confirm = self._confirm
         runtime.notify = self._notify
+        self.start_integrations()
+
+    def start_integrations(self) -> None:
+        """Telegram-мост запускается, если в настройках есть токен бота и разрешённые чаты."""
+        if self.settings.telegram_token and self.settings.telegram_chat_ids:
+            if self.telegram is None:
+                from .telegram_bot import TelegramBridge
+
+                self.telegram = TelegramBridge(self)
+            self.telegram.start()
+        elif self.telegram is not None:
+            self.telegram.stop()
 
     # --- Обработка запросов -------------------------------------------------------------
 
-    def handle(self, text: str, source: str = "text") -> str:
-        """Обрабатывает одну просьбу пользователя (блокирует до конца ответа и озвучки)."""
+    def handle(self, text: str, source: str = "text", reply_to: str = "") -> str:
+        """Обрабатывает одну просьбу пользователя (блокирует до конца ответа и озвучки).
+
+        source: text | voice | telegram; reply_to — чат Telegram, откуда пришла просьба.
+        """
         self._local.source = source
+        self._local.reply_to = reply_to
         self.ui.show_user(text, source)
         getattr(self.ui, "begin_request", lambda: None)()
         self.ui.set_status("thinking")
         reply = self.brain.ask(text)
         self.ui.show_reply(reply)
-        self.say(reply)
+        if source == "telegram":  # ответ уйдёт в Telegram; вслух на компьютере не читаем
+            self.ui.set_status("idle")
+        else:
+            self.say(reply)
         return reply
 
     def say(self, text: str) -> None:
@@ -88,7 +108,10 @@ class Assistant:
     # --- Подтверждение опасных действий -------------------------------------------------
 
     def _confirm(self, prompt: str) -> bool:
-        if getattr(self._local, "source", "text") == "voice" and self.listener:
+        source = getattr(self._local, "source", "text")
+        if source == "telegram" and self.telegram is not None:
+            return self.telegram.confirm(self._local.reply_to, prompt)
+        if source == "voice" and self.listener:
             return self.confirm_by_voice(prompt)
         return self.ui.confirm(prompt)
 

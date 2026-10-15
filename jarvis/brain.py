@@ -33,7 +33,7 @@ class Brain:
         self.on_provider = on_provider or (lambda name: None)
         self._lock = threading.Lock()  # один запрос к ИИ за раз
         self._history_lock = threading.Lock()  # короткая блокировка только для истории
-        self._cancel = threading.Event()  # «Стоп»: прервать текущий запрос к ИИ
+        self._cancel = runtime.cancel  # «Стоп»: прервать текущий запрос к ИИ (видят и инструменты)
         self.history: list[Turn] = []
         self.last_provider = ""
         self.mode = ""

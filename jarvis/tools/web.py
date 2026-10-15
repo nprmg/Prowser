@@ -95,6 +95,13 @@ def get_weather(city: str = "") -> dict:
     Args:
         city: город (по-русски или по-английски). Пусто — определить по местоположению компьютера.
     """
+    if city.strip():
+        try:  # Open-Meteo точнее и надёжнее; wttr.in — запасной вариант и для «где я»
+            from .integrations import open_meteo_weather
+
+            return open_meteo_weather(city.strip())
+        except Exception:  # noqa: BLE001 — любой сбой: пробуем второй сервис
+            pass
     data = json.loads(_fetch(f"https://wttr.in/{urllib.parse.quote(city)}?format=j1&lang=ru", timeout=15))
     current = data["current_condition"][0]
     area = (data.get("nearest_area") or [{}])[0]
@@ -169,3 +176,30 @@ def search_internet(query: str) -> dict:
         if chunk.web:
             sources.append({"title": chunk.web.title, "url": chunk.web.uri})
     return {"answer": response.text, "sources": sources}
+
+
+@tool()
+def download_file(url: str, folder: str = "downloads", filename: str = "") -> dict:
+    """Скачать файл из интернета в папку (по умолчанию «Загрузки»).
+
+    Args:
+        url: прямая ссылка на файл
+        folder: куда сохранить: «загрузки», «рабочий стол» или путь к папке
+        filename: имя файла; пусто — взять из ссылки
+    """
+    import httpx
+
+    from .files import resolve_path
+
+    target_dir = resolve_path(folder)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    name = filename or urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]) or "download"
+    target = target_dir / re.sub(r'[<>:"/\\|?*]', "_", name)
+    size = 0
+    with httpx.stream("GET", url, headers=_HEADERS, follow_redirects=True, timeout=30) as response:
+        response.raise_for_status()
+        with open(target, "wb") as file:
+            for chunk in response.iter_bytes():
+                file.write(chunk)
+                size += len(chunk)
+    return {"saved_to": str(target), "size_mb": round(size / 2**20, 2)}

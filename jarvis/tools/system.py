@@ -277,7 +277,7 @@ def _later(seconds: float, func, *args) -> None:
     timer.start()
 
 
-@tool(confirm=_confirm_power)
+@tool(confirm=_confirm_power, critical=True)
 def power_action(
     action: Literal["shutdown", "restart", "sleep", "hibernate", "lock", "logout", "cancel"],
     delay_seconds: int = 0,
@@ -411,3 +411,45 @@ def run_command(command: str, timeout_seconds: int = 60) -> dict:
     if len(output) > 4000:
         output = output[:4000] + "\n…(вывод обрезан)"
     return {"exit_code": result.returncode, "output": output or "(нет вывода)"}
+
+
+# --- Процессы ------------------------------------------------------------------------------
+
+
+@tool()
+def list_processes(name_filter: str = "", limit: int = 25) -> list[dict]:
+    """Список запущенных процессов (сортировка по памяти): имя, PID, память, процессор.
+
+    Args:
+        name_filter: показать только процессы, в имени которых есть эта строка
+        limit: сколько процессов показать
+    """
+    query = name_filter.lower().strip()
+    rows = []
+    for proc in psutil.process_iter(["pid", "name", "memory_info", "cpu_percent"]):
+        name = proc.info["name"] or ""
+        if query and query not in name.lower():
+            continue
+        memory = proc.info["memory_info"].rss if proc.info["memory_info"] else 0
+        rows.append({"pid": proc.info["pid"], "name": name, "memory_mb": round(memory / 2**20),
+                     "cpu_percent": proc.info["cpu_percent"]})
+    rows.sort(key=lambda row: row["memory_mb"], reverse=True)
+    return rows[: max(1, min(limit, 100))]
+
+
+@tool(confirm=lambda pid: f"Завершить процесс с PID {pid}?")
+def kill_process(pid: int) -> str:
+    """Принудительно завершить процесс по PID (например, зависшую программу).
+
+    Args:
+        pid: идентификатор процесса из list_processes
+    """
+    import os
+
+    if pid in (os.getpid(), os.getppid(), 0, 4):
+        raise ValueError("Этот процесс завершать нельзя")
+    proc = psutil.Process(pid)
+    name = proc.name()
+    proc.kill()
+    proc.wait(timeout=5)
+    return f"Процесс {name} ({pid}) завершён"

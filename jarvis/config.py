@@ -3,14 +3,10 @@
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from dotenv import load_dotenv, set_key
 
-ROOT = Path(__file__).resolve().parent.parent
-ENV_PATH = ROOT / ".env"
-ENV_EXAMPLE_PATH = ROOT / ".env.example"
-LOG_PATH = ROOT / "jarvis.log"
+from .paths import ENV_EXAMPLE_PATH, ENV_PATH, LOG_PATH  # noqa: F401  (LOG_PATH используют main.py и тесты)
 
 DEFAULT_WAKE_WORDS = "джарвис,jarvis,джервис,жарвис,джарвиз,дварвиз,дарвис,гарвис"
 
@@ -77,13 +73,26 @@ class Settings:
     language: str = "ru-RU"
     wake_words: list[str] = field(default_factory=lambda: DEFAULT_WAKE_WORDS.split(","))
     tts_engine: str = "edge"  # edge | system | off
+    voice_profile: str = "jarvis"  # голосовой профиль: jarvis | dmitry | svetlana | system
     tts_voice: str = "ru-RU-DmitryNeural"
     tts_rate: str = "+5%"
     mic_device: int | None = None
     phrase_time_limit: float = 15.0
     confirm_dangerous: bool = True
+    # «Полный доступ»: агент действует без подтверждений (кроме выключения/перезагрузки, см. confirm_power).
+    full_access: bool = True
+    confirm_power: bool = True
     allow_shell: bool = True
     enable_google_search: bool = False
+    # Интеграции
+    telegram_token: str = ""
+    telegram_chat_ids: list[str] = field(default_factory=list)  # кому бот отвечает (защита от чужих)
+    ha_url: str = ""  # Home Assistant, например http://192.168.1.10:8123
+    ha_token: str = ""
+    # Агент
+    autostart: bool = False  # запускаться вместе с Windows (в фоне, в трее)
+    listen_on_start: bool = True  # сразу слушать «Джарвис»
+    overlay: bool = True  # значок в углу экрана, когда ассистент слушает
 
 
 def load_settings() -> Settings:
@@ -106,13 +115,23 @@ def load_settings() -> Settings:
         language=_get("LANGUAGE") or Settings.language,
         wake_words=wake_words,
         tts_engine=(_get("TTS_ENGINE") or Settings.tts_engine).lower(),
+        voice_profile=(_get("VOICE_PROFILE") or Settings.voice_profile).lower(),
         tts_voice=_get("TTS_VOICE") or Settings.tts_voice,
         tts_rate=_get("TTS_RATE") or Settings.tts_rate,
         mic_device=_get_optional_int("MIC_DEVICE"),
         phrase_time_limit=_get_float("PHRASE_TIME_LIMIT", Settings.phrase_time_limit),
         confirm_dangerous=_get_bool("CONFIRM_DANGEROUS", Settings.confirm_dangerous),
+        full_access=_get_bool("FULL_ACCESS", Settings.full_access),
+        confirm_power=_get_bool("CONFIRM_POWER", Settings.confirm_power),
         allow_shell=_get_bool("ALLOW_SHELL", Settings.allow_shell),
         enable_google_search=_get_bool("ENABLE_GOOGLE_SEARCH", Settings.enable_google_search),
+        telegram_token=clean_key(_get("TELEGRAM_BOT_TOKEN")),
+        telegram_chat_ids=[c.strip() for c in _get("TELEGRAM_CHAT_ID").split(",") if c.strip()],
+        ha_url=_get("HOME_ASSISTANT_URL"),
+        ha_token=clean_key(_get("HOME_ASSISTANT_TOKEN")),
+        autostart=_get_bool("AUTOSTART", Settings.autostart),
+        listen_on_start=_get_bool("LISTEN_ON_START", Settings.listen_on_start),
+        overlay=_get_bool("OVERLAY", Settings.overlay),
     )
 
 

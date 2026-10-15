@@ -16,18 +16,40 @@ class ListenerError(RuntimeError):
 
 
 class _StreamReader:
-    def __init__(self, stream):
+    def __init__(self, stream, meter: "LevelMeter | None" = None):
         self._stream = stream
+        self._meter = meter
 
     def read(self, frames: int) -> bytes:
         data, _overflowed = self._stream.read(frames)
-        return bytes(data)
+        chunk = bytes(data)
+        if self._meter is not None:
+            self._meter.feed(chunk)
+        return chunk
+
+
+class LevelMeter:
+    """Громкость микрофона 0..1 (для анимации полосок, пока ассистент слушает)."""
+
+    def __init__(self):
+        self.level = 0.0
+
+    def feed(self, chunk: bytes) -> None:
+        import audioop  # в Python 3.13+ его даёт пакет audioop-lts (зависимость SpeechRecognition)
+
+        rms = audioop.rms(chunk, 2) if chunk else 0
+        target = min(1.0, rms / 2600)
+        self.level = target if target > self.level else self.level * 0.8 + target * 0.2
+
+    def reset(self) -> None:
+        self.level = 0.0
 
 
 class SoundDeviceMicrophone(sr.AudioSource):
     """Микрофон на базе sounddevice — не требует PyAudio, который сложно ставить на Windows."""
 
     def __init__(self, device: int | None = None, sample_rate: int = 16000, chunk_size: int = 1024):
+        self.meter = LevelMeter()
         self.device = device
         self.SAMPLE_RATE = sample_rate
         self.SAMPLE_WIDTH = 2  # int16
@@ -50,7 +72,7 @@ class SoundDeviceMicrophone(sr.AudioSource):
                 samplerate=self.SAMPLE_RATE, blocksize=self.CHUNK, device=self.device, channels=1, dtype="int16"
             )
         self._raw.start()
-        self.stream = _StreamReader(self._raw)
+        self.stream = _StreamReader(self._raw, self.meter)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -60,6 +82,7 @@ class SoundDeviceMicrophone(sr.AudioSource):
         finally:
             self._raw = None
             self.stream = None
+            self.meter.reset()
 
 
 def list_microphones() -> list[str]:
@@ -79,6 +102,11 @@ class Listener:
         self.microphone = SoundDeviceMicrophone(device=settings.mic_device)
         self._calibrated = False
         self._lock = threading.Lock()
+
+    @property
+    def level(self) -> float:
+        meter = getattr(self.microphone, "meter", None)
+        return meter.level if meter is not None else 0.0
 
     def listen_once(self, timeout: float | None = 5, phrase_time_limit: float | None = None) -> str | None:
         """Ждёт фразу (до timeout секунд тишины) и возвращает распознанный текст или None."""

@@ -20,6 +20,9 @@ class Tool:
     func: Callable[..., Any]
     confirm: ConfirmRule = False
     enabled: Callable[[], bool] = lambda: True
+    # Спрашивать даже в режиме «Полный доступ» (выключение ПК и т. п. — по ошибке распознавания
+    # можно потерять несохранённую работу).
+    critical: bool = False
 
     @property
     def name(self) -> str:
@@ -29,7 +32,7 @@ class Tool:
 TOOLS: dict[str, Tool] = {}
 
 
-def tool(confirm: ConfirmRule = False, enabled: Callable[[], bool] | None = None):
+def tool(confirm: ConfirmRule = False, enabled: Callable[[], bool] | None = None, critical: bool = False):
     """Регистрирует функцию как инструмент ассистента.
 
     confirm: False — без подтверждения; True или строка-шаблон (str.format по аргументам) —
@@ -37,7 +40,7 @@ def tool(confirm: ConfirmRule = False, enabled: Callable[[], bool] | None = None
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        TOOLS[func.__name__] = Tool(func, confirm, enabled or (lambda: True))
+        TOOLS[func.__name__] = Tool(func, confirm, enabled or (lambda: True), critical)
         return func
 
     return decorator
@@ -158,7 +161,9 @@ def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         args = _coerce_args(tool_.func, args)
         prompt = _confirmation_prompt(tool_, args)
-        if prompt and runtime.settings.confirm_dangerous and not runtime.confirm(prompt):
+        settings = runtime.settings
+        must_ask = (tool_.critical and settings.confirm_power) or not settings.full_access
+        if prompt and settings.confirm_dangerous and must_ask and not runtime.confirm(prompt):
             return {"error": "Пользователь отменил это действие."}
         result = tool_.func(**args)
     except (LookupError, OSError, ValueError, NotImplementedError) as exc:  # ожидаемые ошибки: «не найдено» и т. п.
